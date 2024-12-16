@@ -109,9 +109,6 @@ async function generateMusic(prompt, lengthSeconds = 60) {
 }
 ```
 
-## Original Setup Instructions
-
-[Previous instructions remain unchanged...]
 
 ## Error Responses
 
