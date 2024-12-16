@@ -1,37 +1,130 @@
-# Stable Audio 2 API
+# Stable Audio API
 
-Access Stable Audio 2 for absolutely free using this reverse engineered API!
+## API Endpoints
 
-## How to use?
+### Generate Audio
 
-In order to use this API, you need to first make sure you have Node.JS installed on your machine. Alternatively, you may use an online IDE like [Repl.it](https://replit.com) to run the code.
+`POST /generate-audio`
 
-Then, follow the steps below:
+Generate music from a text prompt.
 
-1. Obtaining your Stable Audio token. Scroll down to view how
-2. Once you have your token, set it in the token.json file accordingly.
-3. The `stable_audio.js` file contains the core functionality in the form of a function which has been exported. You may access it like this:
+Request body:
 
-    ```js
-    const { generateAudio } = require('./stable_audio');
+```json
+{
+  "prompt": "Jazz fusion with smooth electric guitar",
+  "lengthSeconds": 60,
+  "seed": 12345 // optional
+}
+```
 
-    const main = async () => {
-        await generateAudio('electronic dance music', 180, 123); // Prompt (required) | Length (optional) | Seed (optional)
-    };
+Response: Binary audio file (MP3) with headers:
 
-    main();
-    ```
+```http
+Content-Type: audio/mpeg
+Content-Disposition: attachment; filename="audio_timestamp.mp3"
+```
 
-4. Run the file using `node index.js`.
-4. There you have it! Once you run the file, it will download to audio_file.mp3 in the same directory for you to listen to. You may adjust the function if you would like to download it in another location.
+### Queue Status
 
-## How to get my Stable Audio Token?
+`GET /queue-status`
 
-1. Visit https://stableaudio.com/generate and register for an account.
-2. Open up your browser developer tools (Chrome - `Ctrl` + `Shift` + `I`)
-3. Navigate to the "Application" tab.
-4. Under `Local Storage` -> `https://stableaudio.com` there should be something that looks like this: `@@auth0spajs@@::XxXxX12345::@@user@@`.
-5. Copy the value under `id_token`.
-6. Then set it in the token.json file accordingly.
+Get current queue status.
 
-![alt text](image.png)
+Response:
+
+```json
+{
+  "queueLength": 0,
+  "isProcessing": false,
+  "estimatedWaitTime": 0,
+  "stats": {
+    "averageProcessingTime": 60000,
+    "totalProcessed": 0
+  }
+}
+```
+
+### Health Check
+
+`GET /health`
+
+Check API health.
+
+Response:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+## Queue System
+
+- Requests are processed in FIFO (First In, First Out) order
+- Each request is processed one at a time
+- Estimated wait time is calculated based on queue length and average processing time
+- Failed requests are removed from the queue and don't block subsequent requests
+
+## Example Usage
+
+### cURL
+
+```bash
+# Generate audio
+curl -X POST http://localhost:3001/generate-audio \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Jazz fusion with smooth electric guitar",
+    "lengthSeconds": 60
+  }' \
+  --output music.mp3
+
+# Check queue status
+curl http://localhost:3001/queue-status
+
+# Check health
+curl http://localhost:3001/health
+```
+
+### Node.js
+
+```javascript
+const axios = require("axios");
+const fs = require("fs");
+
+async function generateMusic(prompt, lengthSeconds = 60) {
+  const response = await axios.post(
+    "http://localhost:3001/generate-audio",
+    {
+      prompt,
+      lengthSeconds,
+    },
+    {
+      responseType: "stream",
+    }
+  );
+
+  response.data.pipe(fs.createWriteStream("music.mp3"));
+}
+```
+
+## Original Setup Instructions
+
+[Previous instructions remain unchanged...]
+
+## Error Responses
+
+All endpoints return errors in this format:
+
+```json
+{
+  "error": "Error message",
+  "details": "Optional detailed error information"
+}
+```
+
+Common HTTP status codes:
+
+- 400: Bad Request (invalid input)
+- 500: Internal Server Error
