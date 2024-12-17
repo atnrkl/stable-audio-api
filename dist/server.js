@@ -11,6 +11,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
+var _a, _b, _c;
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const axios_1 = __importDefault(require("axios"));
@@ -18,6 +19,9 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const cors_1 = __importDefault(require("cors"));
+const helmet_1 = __importDefault(require("helmet"));
+const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
+const fs_2 = require("fs");
 dotenv_1.default.config();
 dotenv_1.default.config({ path: path_1.default.resolve(__dirname, "../.env") });
 if (!process.env.TOKEN) {
@@ -26,8 +30,80 @@ if (!process.env.TOKEN) {
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 3001;
 app.use(express_1.default.json());
-// Replace the custom CORS middleware with:
-app.use((0, cors_1.default)());
+// API Configuration
+const apiConfig = {
+    allowedOrigins: ((_a = process.env.ALLOWED_ORIGINS) === null || _a === void 0 ? void 0 : _a.split(",")) || [
+        "http://localhost:3000",
+    ],
+    allowedIPs: ((_b = process.env.ALLOWED_IPS) === null || _b === void 0 ? void 0 : _b.split(",")) || [],
+    apiKeys: ((_c = process.env.API_KEYS) === null || _c === void 0 ? void 0 : _c.split(",")) || [],
+    rateLimit: {
+        windowMs: 15 * 60 * 1000, // 15 minutes
+        max: 100,
+    },
+    audioRateLimit: {
+        windowMs: 60 * 60 * 1000, // 1 hour
+        max: 10,
+    },
+};
+// API Key middleware
+const validateApiKey = (req, res, next) => {
+    const apiKey = req.header("X-API-Key");
+    if (!apiKey || !apiConfig.apiKeys.includes(apiKey)) {
+        res.status(401).json({ error: "Invalid API key" });
+        return;
+    }
+    next();
+};
+// IP validation middleware
+const validateIP = (req, res, next) => {
+    const clientIP = req.ip || req.socket.remoteAddress || "";
+    if (apiConfig.allowedIPs.length > 0 &&
+        !apiConfig.allowedIPs.includes(clientIP)) {
+        res.status(403).json({ error: "IP not allowed" });
+        return;
+    }
+    next();
+};
+// Replace the existing CORS setup with:
+app.use((0, cors_1.default)({
+    origin: (origin, callback) => {
+        if (!origin)
+            return callback(null, true);
+        if (apiConfig.allowedOrigins.includes(origin)) {
+            callback(null, true);
+        }
+        else {
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+    exposedHeaders: ["Content-Disposition"],
+    credentials: true,
+}));
+// Add request logging middleware
+const logRequest = (req, res, next) => {
+    const timestamp = new Date().toISOString();
+    const { method, originalUrl, ip } = req;
+    console.log(`[${timestamp}] ${method} ${originalUrl} - IP: ${ip}`);
+    next();
+};
+app.use(logRequest);
+// Update rate limiters with config
+const limiter = (0, express_rate_limit_1.default)({
+    windowMs: apiConfig.rateLimit.windowMs,
+    max: apiConfig.rateLimit.max,
+    message: { error: "Too many requests, please try again later" },
+});
+const audioLimiter = (0, express_rate_limit_1.default)({
+    windowMs: apiConfig.audioRateLimit.windowMs,
+    max: apiConfig.audioRateLimit.max,
+    message: { error: "Audio generation limit reached, please try again later" },
+});
+// Apply security middleware
+app.use((0, helmet_1.default)());
+app.use(limiter);
 // Ensure the downloads directory exists
 const ensureDownloadsDir = () => {
     const downloadsDir = path_1.default.join(__dirname, "../downloads");
@@ -80,18 +156,17 @@ const queueStats = {
 };
 const ESTIMATED_PROCESSING_TIME = 60000; // 60 seconds baseline
 // Add queue status endpoint
-app.get("/queue-status", (req, res) => {
+app.get("/queue-status", validateApiKey, (req, res) => {
     const averageProcessingTime = queueStats.totalProcessed > 0
         ? queueStats.totalProcessingTime / queueStats.totalProcessed
-        : ESTIMATED_PROCESSING_TIME;
-    const estimatedWaitTime = requestQueue.length * averageProcessingTime;
+        : 60000;
     res.json({
         queueLength: requestQueue.length,
         isProcessing,
-        estimatedWaitTime,
+        estimatedWaitTime: requestQueue.length * averageProcessingTime,
         stats: {
-            averageProcessingTime,
             totalProcessed: queueStats.totalProcessed,
+            averageProcessingTime,
         },
     });
 });
@@ -148,6 +223,7 @@ const processQueue = () => __awaiter(void 0, void 0, void 0, function* () {
         queueStats.totalProcessingTime += processingTime;
     }
     catch (error) {
+        yield logError(error);
         console.error("Error generating audio:", ((_a = error.response) === null || _a === void 0 ? void 0 : _a.data) || error.message);
         res.status(500).json({
             error: "Internal server error",
@@ -164,13 +240,32 @@ app.get("/health", (req, res) => {
     res.status(200).json({ status: "ok" });
 });
 // POST route for generating audio
-app.post("/generate-audio", (req, res) => {
+app.post("/generate-audio", validateApiKey, validateIP, audioLimiter, (req, res) => {
     requestQueue.push({ req, res });
     processQueue();
 });
+// Add an endpoint to check API key validity
+app.get("/verify-key", validateApiKey, (req, res) => {
+    res.status(200).json({ status: "valid" });
+});
+function logError(error) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const logDir = path_1.default.join(__dirname, "../logs");
+        const logFile = path_1.default.join(logDir, "error.log");
+        try {
+            yield fs_2.promises.mkdir(logDir, { recursive: true });
+            const timestamp = new Date().toISOString();
+            const errorMessage = `[${timestamp}] ${error.stack || error}\n`;
+            yield fs_2.promises.appendFile(logFile, errorMessage);
+        }
+        catch (e) {
+            console.error("Failed to write to error log:", e);
+        }
+    });
+}
 exports.default = app;
 if (require.main === module) {
-    app.listen(PORT, () => {
+    app.listen(Number(PORT), "0.0.0.0", () => {
         console.log(`Server is running on port ${PORT}`);
     });
 }

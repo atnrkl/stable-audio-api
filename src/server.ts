@@ -1,9 +1,12 @@
-import express, { Application, Request, Response } from "express";
+import express, { Application, Request, Response, NextFunction } from "express";
 import axios from "axios";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { promises as fsPromises } from "fs";
 
 dotenv.config();
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
@@ -17,8 +20,117 @@ const PORT = process.env.PORT || 3001;
 
 app.use(express.json());
 
-// Replace the custom CORS middleware with:
-app.use(cors());
+// Add these new types
+interface ApiConfig {
+  allowedOrigins: string[];
+  allowedIPs: string[];
+  apiKeys: string[];
+  rateLimit: {
+    windowMs: number;
+    max: number;
+  };
+  audioRateLimit: {
+    windowMs: number;
+    max: number;
+  };
+}
+
+// API Configuration
+const apiConfig: ApiConfig = {
+  allowedOrigins: process.env.ALLOWED_ORIGINS?.split(",") || [
+    "http://localhost:3000",
+  ],
+  allowedIPs: process.env.ALLOWED_IPS?.split(",") || [],
+  apiKeys: process.env.API_KEYS?.split(",") || [],
+  rateLimit: {
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100,
+  },
+  audioRateLimit: {
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 10,
+  },
+};
+
+// API Key middleware
+const validateApiKey = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void => {
+  const apiKey = req.header("X-API-Key");
+
+  if (!apiKey || !apiConfig.apiKeys.includes(apiKey)) {
+    res.status(401).json({ error: "Invalid API key" });
+    return;
+  }
+
+  next();
+};
+
+// IP validation middleware
+const validateIP = (req: Request, res: Response, next: NextFunction): void => {
+  const clientIP = req.ip || req.socket.remoteAddress || "";
+
+  if (
+    apiConfig.allowedIPs.length > 0 &&
+    !apiConfig.allowedIPs.includes(clientIP)
+  ) {
+    res.status(403).json({ error: "IP not allowed" });
+    return;
+  }
+
+  next();
+};
+
+// Replace the existing CORS setup with:
+app.use(
+  cors({
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, origin?: boolean) => void
+    ) => {
+      if (!origin) return callback(null, true);
+
+      if (apiConfig.allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+    exposedHeaders: ["Content-Disposition"],
+    credentials: true,
+  })
+);
+
+// Add request logging middleware
+const logRequest = (req: Request, res: Response, next: NextFunction) => {
+  const timestamp = new Date().toISOString();
+  const { method, originalUrl, ip } = req;
+  console.log(`[${timestamp}] ${method} ${originalUrl} - IP: ${ip}`);
+  next();
+};
+
+app.use(logRequest);
+
+// Update rate limiters with config
+const limiter = rateLimit({
+  windowMs: apiConfig.rateLimit.windowMs,
+  max: apiConfig.rateLimit.max,
+  message: { error: "Too many requests, please try again later" },
+});
+
+const audioLimiter = rateLimit({
+  windowMs: apiConfig.audioRateLimit.windowMs,
+  max: apiConfig.audioRateLimit.max,
+  message: { error: "Audio generation limit reached, please try again later" },
+});
+
+// Apply security middleware
+app.use(helmet());
+app.use(limiter);
 
 // Ensure the downloads directory exists
 const ensureDownloadsDir = (): void => {
@@ -92,21 +204,19 @@ const queueStats: QueueStats = {
 const ESTIMATED_PROCESSING_TIME = 60000; // 60 seconds baseline
 
 // Add queue status endpoint
-app.get("/queue-status", (req: Request, res: Response) => {
+app.get("/queue-status", validateApiKey, (req: Request, res: Response) => {
   const averageProcessingTime =
     queueStats.totalProcessed > 0
       ? queueStats.totalProcessingTime / queueStats.totalProcessed
-      : ESTIMATED_PROCESSING_TIME;
-
-  const estimatedWaitTime = requestQueue.length * averageProcessingTime;
+      : 60000;
 
   res.json({
     queueLength: requestQueue.length,
     isProcessing,
-    estimatedWaitTime,
+    estimatedWaitTime: requestQueue.length * averageProcessingTime,
     stats: {
-      averageProcessingTime,
       totalProcessed: queueStats.totalProcessed,
+      averageProcessingTime,
     },
   });
 });
@@ -181,6 +291,7 @@ const processQueue = async (): Promise<void> => {
     queueStats.totalProcessed++;
     queueStats.totalProcessingTime += processingTime;
   } catch (error: any) {
+    await logError(error);
     console.error(
       "Error generating audio:",
       error.response?.data || error.message
@@ -201,15 +312,40 @@ app.get("/health", (req: Request, res: Response) => {
 });
 
 // POST route for generating audio
-app.post("/generate-audio", (req: Request, res: Response): void => {
-  requestQueue.push({ req, res });
-  processQueue();
+app.post(
+  "/generate-audio",
+  validateApiKey,
+  validateIP,
+  audioLimiter,
+  (req: Request, res: Response): void => {
+    requestQueue.push({ req, res });
+    processQueue();
+  }
+);
+
+// Add an endpoint to check API key validity
+app.get("/verify-key", validateApiKey, (req: Request, res: Response) => {
+  res.status(200).json({ status: "valid" });
 });
+
+async function logError(error: any) {
+  const logDir = path.join(__dirname, "../logs");
+  const logFile = path.join(logDir, "error.log");
+
+  try {
+    await fsPromises.mkdir(logDir, { recursive: true });
+    const timestamp = new Date().toISOString();
+    const errorMessage = `[${timestamp}] ${error.stack || error}\n`;
+    await fsPromises.appendFile(logFile, errorMessage);
+  } catch (e) {
+    console.error("Failed to write to error log:", e);
+  }
+}
 
 export default app;
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`Server is running on port ${PORT}`);
   });
 }
