@@ -23,8 +23,6 @@ app.use(express.json());
 // Add these new types
 interface ApiConfig {
   allowedOrigins: string[];
-  allowedIPs: string[];
-  apiKeys: string[];
   rateLimit: {
     windowMs: number;
     max: number;
@@ -37,50 +35,15 @@ interface ApiConfig {
 
 // API Configuration
 const apiConfig: ApiConfig = {
-  allowedOrigins: process.env.ALLOWED_ORIGINS?.split(",") || [
-    "http://localhost:3000",
-  ],
-  allowedIPs: process.env.ALLOWED_IPS?.split(",") || [],
-  apiKeys: process.env.API_KEYS?.split(",") || [],
+  allowedOrigins: process.env.ALLOWED_ORIGINS?.split(",") || ["*"],
   rateLimit: {
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 15 * 60 * 1000,
     max: 100,
   },
   audioRateLimit: {
-    windowMs: 60 * 60 * 1000, // 1 hour
+    windowMs: 60 * 60 * 1000,
     max: 10,
   },
-};
-
-// API Key middleware
-const validateApiKey = (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void => {
-  const apiKey = req.header("X-API-Key");
-
-  if (!apiKey || !apiConfig.apiKeys.includes(apiKey)) {
-    res.status(401).json({ error: "Invalid API key" });
-    return;
-  }
-
-  next();
-};
-
-// IP validation middleware
-const validateIP = (req: Request, res: Response, next: NextFunction): void => {
-  const clientIP = req.ip || req.socket.remoteAddress || "";
-
-  if (
-    apiConfig.allowedIPs.length > 0 &&
-    !apiConfig.allowedIPs.includes(clientIP)
-  ) {
-    res.status(403).json({ error: "IP not allowed" });
-    return;
-  }
-
-  next();
 };
 
 // Replace the existing CORS setup with:
@@ -90,8 +53,19 @@ app.use(
       origin: string | undefined,
       callback: (err: Error | null, origin?: boolean) => void
     ) => {
-      if (!origin) return callback(null, true);
+      // If allowedOrigins includes "*", allow all origins
+      if (apiConfig.allowedOrigins.includes("*")) {
+        callback(null, true);
+        return;
+      }
 
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      // Check if origin is in allowed list
       if (apiConfig.allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -99,7 +73,7 @@ app.use(
       }
     },
     methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+    allowedHeaders: ["Content-Type", "Authorization"],
     exposedHeaders: ["Content-Disposition"],
     credentials: true,
   })
@@ -204,7 +178,7 @@ const queueStats: QueueStats = {
 const ESTIMATED_PROCESSING_TIME = 60000; // 60 seconds baseline
 
 // Add queue status endpoint
-app.get("/queue-status", validateApiKey, (req: Request, res: Response) => {
+app.get("/queue-status", (req: Request, res: Response) => {
   const averageProcessingTime =
     queueStats.totalProcessed > 0
       ? queueStats.totalProcessingTime / queueStats.totalProcessed
@@ -314,19 +288,12 @@ app.get("/health", (req: Request, res: Response) => {
 // POST route for generating audio
 app.post(
   "/generate-audio",
-  validateApiKey,
-  validateIP,
   audioLimiter,
   (req: Request, res: Response): void => {
     requestQueue.push({ req, res });
     processQueue();
   }
 );
-
-// Add an endpoint to check API key validity
-app.get("/verify-key", validateApiKey, (req: Request, res: Response) => {
-  res.status(200).json({ status: "valid" });
-});
 
 async function logError(error: any) {
   const logDir = path.join(__dirname, "../logs");
