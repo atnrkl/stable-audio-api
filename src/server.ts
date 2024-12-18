@@ -197,14 +197,24 @@ app.get("/queue-status", (req: Request, res: Response) => {
   });
 });
 
-// Function to process the queue
+// Add a map to store job statuses
+const jobStatuses = new Map<
+  string,
+  {
+    status: "processing" | "complete" | "error";
+    result?: string;
+    error?: string;
+  }
+>();
+
+// Modify processQueue to update job status
 const processQueue = async (): Promise<void> => {
   if (isProcessing || requestQueue.length === 0) {
     return;
   }
 
   isProcessing = true;
-  const { req, res, onProgress } = requestQueue.shift()!;
+  const { jobId, req, res } = requestQueue.shift()!;
   const startTime = Date.now();
 
   try {
@@ -215,10 +225,7 @@ const processQueue = async (): Promise<void> => {
     } = req.body;
 
     if (!prompt || typeof lengthSeconds !== "number") {
-      res.status(400).json({
-        error:
-          "Invalid input: prompt (string) and lengthSeconds (number) are required",
-      });
+      jobStatuses.set(jobId!, { status: "error", error: "Invalid input" });
       return;
     }
 
@@ -249,32 +256,20 @@ const processQueue = async (): Promise<void> => {
     ensureDownloadsDir();
     await downloadFile(resultUrl, filePath);
 
-    // Send file with proper headers
-    res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-
-    // Use a stream to send the file
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.pipe(res);
-
-    // Clean up file after sending
-    fileStream.on("end", () => {
-      fs.unlinkSync(filePath);
+    jobStatuses.set(jobId!, {
+      status: "complete",
+      result: fileName,
     });
 
-    // Update statistics after successful processing
+    // Update statistics
     const processingTime = Date.now() - startTime;
     queueStats.totalProcessed++;
     queueStats.totalProcessingTime += processingTime;
   } catch (error: any) {
     await logError(error);
-    console.error(
-      "Error generating audio:",
-      error.response?.data || error.message
-    );
-    res.status(500).json({
-      error: "Internal server error",
-      details: error.response?.data || error.message,
+    jobStatuses.set(jobId!, {
+      status: "error",
+      error: error.response?.data || error.message,
     });
   } finally {
     isProcessing = false;
@@ -296,9 +291,31 @@ app.post("/start-generation", audioLimiter, (req: Request, res: Response) => {
 });
 
 // 2. Check status and get result
-app.get("/check-status/:jobId", (req: Request, res: Response) => {
+app.get("/check-status/:jobId", (req: Request, res: Response): void => {
   const { jobId } = req.params;
-  // Return status or final result
+  const status = jobStatuses.get(jobId);
+
+  if (!status) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+
+  if (status.status === "complete") {
+    const filePath = path.join(__dirname, "../downloads", status.result!);
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${status.result}"`
+    );
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+    fileStream.on("end", () => {
+      fs.unlinkSync(filePath);
+      jobStatuses.delete(jobId);
+    });
+  } else {
+    res.json(status);
+  }
 });
 
 async function logError(error: any) {
