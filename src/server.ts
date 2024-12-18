@@ -282,41 +282,44 @@ app.get("/health", (req: Request, res: Response) => {
   res.status(200).json({ status: "ok" });
 });
 
-// 1. Start generation
-app.post("/start-generation", audioLimiter, (req: Request, res: Response) => {
+// 1. Start generation - update path
+app.post("/api/generate-audio", audioLimiter, (req: Request, res: Response) => {
   const jobId = Date.now().toString();
   requestQueue.push({ jobId, req, res });
   processQueue();
   res.json({ jobId, status: "processing" });
 });
 
-// 2. Check status and get result
-app.get("/check-status/:jobId", (req: Request, res: Response): void => {
-  const { jobId } = req.params;
-  const status = jobStatuses.get(jobId);
+// 2. Check status - update path
+app.get(
+  "/api/generate-audio/status/:jobId",
+  (req: Request, res: Response): void => {
+    const { jobId } = req.params;
+    const status = jobStatuses.get(jobId);
 
-  if (!status) {
-    res.status(404).json({ error: "Job not found" });
-    return;
-  }
+    if (!status) {
+      res.status(404).json({ error: "Job not found" });
+      return;
+    }
 
-  if (status.status === "complete") {
-    const filePath = path.join(__dirname, "../downloads", status.result!);
-    res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${status.result}"`
-    );
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.pipe(res);
-    fileStream.on("end", () => {
-      fs.unlinkSync(filePath);
-      jobStatuses.delete(jobId);
-    });
-  } else {
-    res.json(status);
+    if (status.status === "complete") {
+      const filePath = path.join(__dirname, "../downloads", status.result!);
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${status.result}"`
+      );
+      const fileStream = fs.createReadStream(filePath);
+      fileStream.pipe(res);
+      fileStream.on("end", () => {
+        fs.unlinkSync(filePath);
+        jobStatuses.delete(jobId);
+      });
+    } else {
+      res.json(status);
+    }
   }
-});
+);
 
 async function logError(error: any) {
   const logDir = path.join(__dirname, "../logs");
