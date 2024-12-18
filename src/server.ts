@@ -217,6 +217,9 @@ function debugLog(...args: any[]) {
   }
 }
 
+// Add a map to store file paths
+const fileDownloads = new Map<string, string>();
+
 // Modify processQueue to include debug logging
 const processQueue = async (): Promise<void> => {
   if (isProcessing || requestQueue.length === 0) {
@@ -271,6 +274,8 @@ const processQueue = async (): Promise<void> => {
     ensureDownloadsDir();
     await downloadFile(resultUrl, filePath);
 
+    // Store the file path and update status
+    fileDownloads.set(jobId!, filePath);
     jobStatuses.set(jobId!, {
       status: "complete",
       result: fileName,
@@ -327,7 +332,12 @@ app.get(
     }
 
     if (status.status === "complete") {
-      const filePath = path.join(__dirname, "../downloads", status.result!);
+      const filePath = fileDownloads.get(jobId);
+      if (!filePath || !fs.existsSync(filePath)) {
+        res.status(404).json({ error: "File not found" });
+        return;
+      }
+
       res.setHeader("Content-Type", "audio/mpeg");
       res.setHeader(
         "Content-Disposition",
@@ -336,8 +346,14 @@ app.get(
       const fileStream = fs.createReadStream(filePath);
       fileStream.pipe(res);
       fileStream.on("end", () => {
+        // Only delete after successful transfer
         fs.unlinkSync(filePath);
+        fileDownloads.delete(jobId);
         jobStatuses.delete(jobId);
+      });
+      fileStream.on("error", (error) => {
+        debugLog("File stream error:", error);
+        res.status(500).json({ error: "File streaming error" });
       });
     } else {
       res.json(status);
