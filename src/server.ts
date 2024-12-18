@@ -157,8 +157,10 @@ const downloadFile = async (url: string, filePath: string): Promise<void> => {
 
 // Queue to manage requests
 type QueueItem = {
+  jobId?: string;
   req: Request;
   res: Response;
+  onProgress?: (progress: string) => void;
 };
 
 const requestQueue: QueueItem[] = [];
@@ -202,7 +204,7 @@ const processQueue = async (): Promise<void> => {
   }
 
   isProcessing = true;
-  const { req, res } = requestQueue.shift()!;
+  const { req, res, onProgress } = requestQueue.shift()!;
   const startTime = Date.now();
 
   try {
@@ -285,15 +287,19 @@ app.get("/health", (req: Request, res: Response) => {
   res.status(200).json({ status: "ok" });
 });
 
-// POST route for generating audio
-app.post(
-  "/generate-audio",
-  audioLimiter,
-  (req: Request, res: Response): void => {
-    requestQueue.push({ req, res });
-    processQueue();
-  }
-);
+// 1. Start generation
+app.post("/start-generation", audioLimiter, (req: Request, res: Response) => {
+  const jobId = Date.now().toString();
+  requestQueue.push({ jobId, req, res });
+  processQueue();
+  res.json({ jobId, status: "processing" });
+});
+
+// 2. Check status and get result
+app.get("/check-status/:jobId", (req: Request, res: Response) => {
+  const { jobId } = req.params;
+  // Return status or final result
+});
 
 async function logError(error: any) {
   const logDir = path.join(__dirname, "../logs");
