@@ -207,14 +207,29 @@ const jobStatuses = new Map<
   }
 >();
 
-// Modify processQueue to update job status
+// Add near the top of the file, after other imports
+const DEBUG = process.env.NODE_ENV !== "production";
+
+// Add this function
+function debugLog(...args: any[]) {
+  if (DEBUG) {
+    console.log("[Debug]", ...args);
+  }
+}
+
+// Modify processQueue to include debug logging
 const processQueue = async (): Promise<void> => {
   if (isProcessing || requestQueue.length === 0) {
+    debugLog("Queue status:", {
+      isProcessing,
+      queueLength: requestQueue.length,
+    });
     return;
   }
 
   isProcessing = true;
   const { jobId, req, res } = requestQueue.shift()!;
+  debugLog("Processing job:", jobId);
   const startTime = Date.now();
 
   try {
@@ -265,7 +280,10 @@ const processQueue = async (): Promise<void> => {
     const processingTime = Date.now() - startTime;
     queueStats.totalProcessed++;
     queueStats.totalProcessingTime += processingTime;
+
+    debugLog("Job completed:", jobId);
   } catch (error: any) {
+    debugLog("Job failed:", jobId, error);
     await logError(error);
     jobStatuses.set(jobId!, {
       status: "error",
@@ -285,6 +303,10 @@ app.get("/health", (req: Request, res: Response) => {
 // 1. Start generation - update path
 app.post("/api/generate-audio", audioLimiter, (req: Request, res: Response) => {
   const jobId = Date.now().toString();
+
+  // Set initial job status
+  jobStatuses.set(jobId, { status: "processing" });
+
   requestQueue.push({ jobId, req, res });
   processQueue();
   res.json({ jobId, status: "processing" });
@@ -295,7 +317,9 @@ app.get(
   "/api/generate-audio/status/:jobId",
   (req: Request, res: Response): void => {
     const { jobId } = req.params;
+    debugLog("Checking status for job:", jobId);
     const status = jobStatuses.get(jobId);
+    debugLog("Current status:", status);
 
     if (!status) {
       res.status(404).json({ error: "Job not found" });
